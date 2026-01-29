@@ -105,6 +105,43 @@ You can ONLY do this if you're not blocked by doing work directly.
 
 ---
 
+## MANDATORY: BACKGROUND AGENTS MUST SEND PROGRESS UPDATES
+
+**All background agents MUST send progress updates to the user via `send_to_telegram`.** The user cannot see what's happening otherwise and will think the system is hung.
+
+### Requirements for ALL background agent prompts:
+
+When spawning a background agent, ALWAYS include these instructions in the prompt:
+
+1. **Send updates every 30 seconds** or at key milestones (whichever comes first)
+2. **Report what step you're currently on** (e.g., "Opening browser...", "Navigating to site...", "Entering credentials...")
+3. **Report immediately if something goes wrong** (errors, timeouts, unexpected states)
+4. **Send a final completion message** when done
+
+### Example agent prompt:
+
+```
+Task: Log into GitHub and get API key
+
+IMPORTANT: You MUST send progress updates to the user via send_to_telegram:
+- Send an update every 30 seconds OR at each major step
+- Report what you're currently doing
+- Report any errors immediately
+- Send final results when complete
+
+Steps:
+1. Open browser and navigate to github.com
+2. ...
+```
+
+### Why this matters:
+
+- Long tasks (especially browser automation) can take minutes
+- Without updates, user thinks the system is frozen/broken
+- Progress updates provide peace of mind and transparency
+
+---
+
 ## IMPORTANT FILES & REFERENCES
 
 ### API Keys Storage

@@ -8,6 +8,8 @@ TeleClaude is a bridge that connects Telegram to [Claude Code CLI](https://www.a
 
 - **Telegram Integration** - Chat with Claude from your phone via a Telegram bot
 - **Local CLI Mode** - Use the terminal interface without Telegram setup
+- **Image Support** - Send images to Claude via Telegram for visual analysis
+- **Comprehensive Logging** - Debug logs for bridge, Claude, MCP, and agent activity
 - **One-Click Windows Installer** - Double-click `install.bat` to get started
 - **Interactive Setup Wizard** - Guided configuration for both modes
 - **MCP Server Support** - Extensible with additional MCP servers
@@ -58,11 +60,14 @@ The setup wizard will guide you through:
 | Command | Description |
 |---------|-------------|
 | `/help` | Show available commands |
-| `/status` | Check if Claude is running |
+| `/status` | Check if Claude is running + view log files |
 | `/restart` | Restart Claude session |
 | `/kill` | Stop all Claude processes |
 | `/reset` | Full reset and restart |
 | `/ping` | Test bridge responsiveness |
+| `/logs` | Show recent bridge logs |
+| `/logs [category]` | Show logs for specific category (bridge, claude, mcp, agent, system) |
+| `/logs [category] [lines]` | Show specific number of log lines |
 
 ## Configuration
 
@@ -129,15 +134,82 @@ teleclaude/
 ├── install.bat           # Windows batch installer
 ├── install.ps1           # Windows PowerShell installer
 ├── lib/
-│   └── platform.js       # Cross-platform utilities
+│   ├── platform.js       # Cross-platform utilities
+│   └── logger.js         # Comprehensive logging system
 ├── mcp/
-│   ├── telegram-bridge.js  # MCP server implementation
+│   ├── telegram-bridge.js  # MCP server implementation (with logging)
 │   └── config.json         # MCP configuration
+├── logs/                 # Log files (created automatically)
+│   ├── bridge-YYYY-MM-DD.log   # Bridge activity logs
+│   ├── claude-YYYY-MM-DD.log   # Claude PTY output logs
+│   ├── mcp-YYYY-MM-DD.log      # MCP tool call logs
+│   ├── agent-YYYY-MM-DD.log    # Background agent logs
+│   └── system-YYYY-MM-DD.log   # System event logs
+├── images/               # Downloaded Telegram images (created automatically)
 ├── CLAUDE.md             # Instructions for Claude
 ├── SKILLS.md             # Workflow documentation
 ├── API_KEYS.md           # API key storage template
 ├── config.example.json   # Example configuration
 └── .env.example          # Example environment variables
+```
+
+## Image Support
+
+Send images to Claude via Telegram for visual analysis:
+
+1. **Send as Photo** - Compress and send via Telegram's photo feature
+2. **Send as File** - Send original quality as document
+
+Images are automatically:
+- Downloaded to the `images/` directory
+- Passed to Claude with the file path
+- Accessible via Claude's Read tool for multimodal analysis
+
+Supported formats: JPG, PNG, GIF, WebP, and other common image formats.
+
+## Logging System
+
+The bridge includes comprehensive logging for debugging:
+
+### Log Categories
+
+| Category | Description |
+|----------|-------------|
+| `bridge` | User messages, Telegram sends, authorization |
+| `claude` | Claude PTY input/output, process lifecycle |
+| `mcp` | MCP tool calls (send_to_telegram) |
+| `agent` | Background agent spawning and completion |
+| `system` | Process lifecycle, errors, crashes |
+
+### Viewing Logs
+
+**Via Telegram:**
+```
+/logs              # Show recent bridge logs
+/logs claude       # Show Claude PTY logs
+/logs mcp 50       # Show 50 lines of MCP logs
+/status            # Shows log file sizes
+```
+
+**Via Terminal:**
+```bash
+# View today's bridge logs
+cat logs/bridge-$(date +%Y-%m-%d).log
+
+# Follow logs in real-time
+tail -f logs/bridge-*.log
+```
+
+### Log Format
+
+```
+[2024-01-15T10:30:45.123Z] [INFO] USER_MESSAGE received
+  DATA: {
+    "userId": 123456789,
+    "chatId": 123456789,
+    "message": "Hello Claude!",
+    "messageLength": 13
+  }
 ```
 
 ## Running as a Service
@@ -206,17 +278,68 @@ Edit `mcp/config.json` to add additional MCP servers:
 ### Access denied
 Your Telegram user ID is not in the allowed list. Add it to `config.json` in the `allowedUsers` array.
 
-### Windows build errors
+### Windows-Specific Issues
+
+#### node-pty build errors
 If you get node-pty build errors, install Windows Build Tools:
 ```cmd
 npm install -g windows-build-tools
 ```
+
+Or install Visual Studio Build Tools manually:
+1. Download [Build Tools for Visual Studio](https://visualstudio.microsoft.com/visual-cpp-build-tools/)
+2. Install "Desktop development with C++" workload
+3. Restart your terminal and try `npm install` again
+
+#### Path issues on Windows
+- The bridge uses forward slashes internally but normalizes paths for Windows
+- If you see path errors, ensure your working directory uses valid Windows paths
+- Environment variables like `%USERPROFILE%` are supported
+
+#### Process termination on Windows
+- Use `Ctrl+C` to gracefully stop the bridge
+- If Claude processes hang, use the `/kill` command or Task Manager
+- The `pkill` commands shown in logs only apply to Unix systems
 
 ### Authentication issues
 Make sure Claude Code CLI is authenticated:
 ```bash
 claude
 # Follow the login prompts
+```
+
+## Cross-Platform Notes
+
+TeleClaude is designed to work on Windows, macOS, and Linux with the same codebase:
+
+| Feature | Windows | macOS/Linux |
+|---------|---------|-------------|
+| Installation | `install.bat` or `install.ps1` | `npm run setup` |
+| Terminal | Command Prompt, PowerShell, or Windows Terminal | bash, zsh, etc. |
+| Home Directory | `%USERPROFILE%` | `$HOME` |
+| Temp Files | `%TEMP%\tg-response.txt` | `/tmp/tg-response.txt` |
+| Process Signals | Limited SIGINT support | Full signal support |
+| Path Separators | Handled automatically | Handled automatically |
+
+### Windows-Specific Installation Methods
+
+**Option 1: Batch File (Recommended)**
+```cmd
+:: Double-click install.bat or run:
+install.bat
+```
+
+**Option 2: PowerShell**
+```powershell
+# Right-click install.ps1 -> Run with PowerShell
+# Or run in terminal:
+powershell -ExecutionPolicy Bypass -File install.ps1
+```
+
+**Option 3: Manual npm**
+```cmd
+npm install
+npm run setup
 ```
 
 ## Security Notes

@@ -10,6 +10,8 @@
  * - Chunked message sending for long responses
  * - CLI-only mode (no Telegram required)
  * - Cross-platform Windows/Unix compatibility
+ * - Image receiving from Telegram
+ * - Comprehensive logging system
  */
 
 const TelegramBot = require('node-telegram-bot-api');
@@ -17,16 +19,26 @@ const pty = require('node-pty');
 const fs = require('fs');
 const path = require('path');
 const readline = require('readline');
+const https = require('https');
 
 // Cross-platform utilities
 const platform = require('./lib/platform');
+
+// Import logging system
+const logger = require('./lib/logger');
 
 // Configuration paths
 const CONFIG_FILE = path.join(__dirname, 'config.json');
 const BRIDGE_DIR = __dirname;
 const OUTPUT_FILE = platform.getOutputFile();
 const MCP_CONFIG = path.join(__dirname, 'mcp', 'config.json');
+const IMAGES_DIR = path.join(__dirname, 'images');
 const MAX_MSG = 4000;
+
+// Ensure images directory exists
+if (!fs.existsSync(IMAGES_DIR)) {
+  fs.mkdirSync(IMAGES_DIR, { recursive: true });
+}
 
 // ANSI color codes
 const colors = {
@@ -50,6 +62,9 @@ let config = null;
 let claude = null;
 let chatId = null;
 let lastMtime = 0;
+let claudeStartTime = null;
+let lastUserMessage = null;
+let lastUserMessageTime = null;
 let bot = null;
 
 // ============================================
@@ -277,7 +292,12 @@ function showSetupMessage() {
 // ============================================
 
 function killOrphanedClaude() {
-  return platform.killClaudeProcesses();
+  logger.logSystemCommand('killOrphanedClaude', { reason: 'cleanup' });
+  const result = platform.killClaudeProcesses();
+  if (result) {
+    logger.loggers.system.info('killOrphanedClaude completed successfully');
+  }
+  return result;
 }
 
 function getProcessStatus() {
@@ -285,16 +305,76 @@ function getProcessStatus() {
 }
 
 // ============================================
+// IMAGE HANDLING
+// ============================================
+
+// Download image from Telegram and save locally
+async function downloadTelegramFile(fileId, originalFilename) {
+  try {
+    // Get file info from Telegram
+    const fileInfo = await bot.getFile(fileId);
+    const filePath = fileInfo.file_path;
+
+    // Determine file extension
+    let ext = path.extname(filePath) || path.extname(originalFilename || '') || '.jpg';
+
+    // Generate unique filename with timestamp
+    const timestamp = Date.now();
+    const localFilename = `image_${timestamp}${ext}`;
+    const localPath = path.join(IMAGES_DIR, localFilename);
+
+    // Download URL
+    const downloadUrl = `https://api.telegram.org/file/bot${config.telegramToken}/${filePath}`;
+
+    logger.loggers.bridge.info('Downloading image from Telegram', {
+      fileId,
+      filePath,
+      localPath,
+    });
+
+    // Download file
+    return new Promise((resolve, reject) => {
+      const file = fs.createWriteStream(localPath);
+      https.get(downloadUrl, (response) => {
+        response.pipe(file);
+        file.on('finish', () => {
+          file.close();
+          logger.loggers.bridge.info('Image downloaded successfully', { localPath });
+          resolve(localPath);
+        });
+      }).on('error', (err) => {
+        fs.unlink(localPath, () => {}); // Delete partial file
+        logger.loggers.bridge.error('Failed to download image', { error: err.message });
+        reject(err);
+      });
+    });
+  } catch (error) {
+    logger.loggers.bridge.error('Error in downloadTelegramFile', { error: error.message });
+    throw error;
+  }
+}
+
+// ============================================
 // CLAUDE MANAGEMENT (Telegram Mode)
 // ============================================
 
 function startClaude() {
-  if (claude) return;
+  if (claude) {
+    logger.loggers.system.warn('startClaude called but Claude already running');
+    return;
+  }
 
   // Ensure output file directory exists
   platform.ensureDir(path.dirname(OUTPUT_FILE));
   fs.writeFileSync(OUTPUT_FILE, '', 'utf8');
   lastMtime = Date.now();
+  claudeStartTime = Date.now();
+
+  logger.logClaudeStart();
+  logger.loggers.claude.info('Spawning Claude process', {
+    cwd: BRIDGE_DIR,
+    mcpConfig: MCP_CONFIG,
+  });
 
   console.log('Starting Claude with MCP...');
 
@@ -320,27 +400,62 @@ function startClaude() {
     useConpty: platform.isWindows // Use ConPTY on Windows
   });
 
+  logger.loggers.claude.info('Claude process spawned', { pid: claude.pid });
+
   claude.onData((data) => {
-    const clean = data.toString().replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '').trim();
+    // Log PTY output for debugging
+    const raw = data.toString();
+    const clean = raw.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '').trim();
+
+    // Log to file
+    logger.logClaudeOutput(clean);
+
+    // Also console log for real-time monitoring
     if (clean) console.log('PTY:', clean.slice(0, 200));
+
+    // Detect potential issues in output
+    if (clean.toLowerCase().includes('error') || clean.toLowerCase().includes('exception')) {
+      logger.loggers.claude.warn('Potential error detected in Claude output', { output: clean.slice(0, 500) });
+    }
+    if (clean.toLowerCase().includes('timeout')) {
+      logger.loggers.claude.warn('Timeout detected in Claude output', { output: clean.slice(0, 500) });
+    }
+    if (clean.toLowerCase().includes('task') && (clean.toLowerCase().includes('spawn') || clean.toLowerCase().includes('agent'))) {
+      logger.logAgentSpawned(clean.slice(0, 300));
+    }
   });
 
   claude.onExit((e) => {
+    const uptime = claudeStartTime ? Date.now() - claudeStartTime : 0;
+    logger.logClaudeExit(e.exitCode, e.signal);
+    logger.loggers.system.info('Claude uptime before exit', {
+      uptimeMs: uptime,
+      uptimeReadable: `${Math.round(uptime / 1000)}s`,
+      lastUserMessage,
+      timeSinceLastMessage: lastUserMessageTime ? Date.now() - lastUserMessageTime : null,
+    });
+
     console.log('Claude exited:', e.exitCode);
     claude = null;
+    claudeStartTime = null;
     if (chatId) bot.sendMessage(chatId, 'Claude session ended. Send a message to restart.');
   });
 
   // Init prompt
   setTimeout(() => {
     if (!claude) {
+      logger.loggers.claude.warn('Claude not ready for init, skipping');
       console.log('Claude not ready for init, skipping');
       return;
     }
+    logger.loggers.claude.info('Sending init message to Claude');
     console.log('Sending init...');
     claude.write('Confirm you\'re ready by using send_to_telegram.');
     setTimeout(() => {
-      if (claude) claude.write('\r');
+      if (claude) {
+        logger.loggers.claude.debug('Sending Enter key');
+        claude.write('\r');
+      }
     }, 500);
   }, 5000);
 
@@ -352,6 +467,8 @@ function startClaude() {
 // ============================================
 
 function sendChunked(text) {
+  logger.logTelegramSend(chatId, text);
+  console.log('sendChunked called, text length:', text.length);
   const chunks = [];
   while (text.length > 0) {
     if (text.length <= MAX_MSG) { chunks.push(text); break; }
@@ -361,25 +478,44 @@ function sendChunked(text) {
     text = text.slice(i).trim();
   }
 
-  chunks.forEach((c, idx) => {
+  logger.loggers.bridge.debug('Splitting message into chunks', { chunkCount: chunks.length });
+  console.log('Sending', chunks.length, 'chunks to chatId:', chatId);
+  chunks.forEach((chunk, idx) => {
     setTimeout(() => {
-      bot.sendMessage(chatId, c)
-        .catch(e => console.error('Send error:', e.message));
+      console.log('Sending chunk', idx + 1);
+      bot.sendMessage(chatId, chunk)
+        .then(() => {
+          logger.loggers.bridge.debug(`Chunk ${idx + 1}/${chunks.length} sent successfully`);
+          console.log('Chunk', idx + 1, 'sent OK');
+        })
+        .catch(e => {
+          logger.logTelegramSendError(chatId, e);
+          console.error('Send error:', e.message);
+        });
     }, idx * 300);
   });
 }
 
 function sendToClaude(userMessage) {
   if (!claude) {
+    logger.loggers.claude.info('Claude not running, starting...');
     startClaude();
     setTimeout(() => sendToClaude(userMessage), 7000);
     return;
   }
 
+  // Track last message for debugging
+  lastUserMessage = userMessage;
+  lastUserMessageTime = Date.now();
+
+  logger.logClaudeInput(userMessage);
   console.log('To Claude:', userMessage.slice(0, 60));
   claude.write(userMessage);
   setTimeout(() => {
-    if (claude) claude.write('\r');
+    if (claude) {
+      logger.loggers.claude.debug('Sending Enter key after user message');
+      claude.write('\r');
+    }
   }, 300);
 }
 
@@ -394,6 +530,8 @@ async function startTelegramMode() {
   // Initialize bot
   bot = new TelegramBot(config.telegramToken, { polling: true });
 
+  logger.loggers.system.info('Bridge started (with comprehensive logging)');
+  logger.loggers.system.info('Allowed Telegram IDs', { allowedUsers: config.allowedUsers });
   console.log('Claude Telegram Bridge started');
   console.log(`Allowed users: ${config.allowedUsers.join(', ')}`);
 
@@ -405,8 +543,22 @@ async function startTelegramMode() {
         lastMtime = stat.mtimeMs;
         const content = fs.readFileSync(OUTPUT_FILE, 'utf8').trim();
 
-        if (content && chatId) {
-          sendChunked(content);
+        if (content) {
+          logger.logMcpToolResult('send_to_telegram', true, content);
+          logger.loggers.bridge.info('Response received from Claude via MCP', {
+            contentLength: content.length,
+            preview: content.slice(0, 200),
+          });
+
+          console.log('Got:', content.slice(0, 100));
+          console.log('chatId:', chatId);
+          if (chatId) {
+            console.log('Sending to Telegram...');
+            sendChunked(content);
+          } else {
+            logger.loggers.bridge.warn('No chatId set, dropping message', { content: content.slice(0, 200) });
+            console.log('No chatId yet, dropping message');
+          }
           fs.writeFileSync(OUTPUT_FILE, '', 'utf8');
           lastMtime = Date.now();
         }
@@ -416,50 +568,110 @@ async function startTelegramMode() {
 
   // Handle messages
   bot.on('message', (msg) => {
-    console.log('MSG:', msg.from.id, msg.text?.slice(0, 50));
+    const userId = msg.from.id;
+    const msgChatId = msg.chat.id;
+    const text = msg.text || '';
 
-    if (!config.allowedUsers.includes(msg.from.id)) {
-      bot.sendMessage(msg.chat.id, 'Access denied. Your user ID is not in the allowed list.');
+    logger.logUserMessage(userId, msgChatId, text);
+    console.log('MSG:', userId, text?.slice(0, 50));
+
+    if (!config.allowedUsers.includes(userId)) {
+      // Log detailed unauthorized access attempt
+      logger.loggers.bridge.warn('UNAUTHORIZED ACCESS ATTEMPT', {
+        userId,
+        username: msg.from.username || 'unknown',
+        firstName: msg.from.first_name || 'unknown',
+        lastName: msg.from.last_name || 'unknown',
+        chatId: msgChatId,
+        messageText: text.slice(0, 100),
+        timestamp: new Date().toISOString(),
+      });
+      console.log(`[SECURITY] Unauthorized access attempt from user ${userId} (${msg.from.username || 'no username'})`);
+
+      // Send polite rejection message
+      bot.sendMessage(msgChatId,
+        'Sorry, this bot is private and only accessible to authorized users. ' +
+        'If you believe this is an error, please contact the bot administrator.'
+      ).catch(e => {
+        logger.loggers.bridge.error('Failed to send rejection message', { error: e.message });
+      });
       return;
     }
 
-    chatId = msg.chat.id;
-    const text = msg.text;
+    chatId = msgChatId;
 
     // Command handlers
     if (text === '/help') {
+      logger.logSystemCommand('/help');
       bot.sendMessage(chatId,
 `*Bridge Commands*
 
-/status - Check if Claude is running
-/restart - Restart Claude session
-/kill - Kill all Claude processes
-/reset - Full reset and restart
-/ping - Check bridge responsiveness
+/status - Check if Claude is running + process info
+/restart - Graceful restart (kill current, start new)
+/kill - Nuclear kill ALL Claude processes
+/reset - Full reset (kill all + restart fresh)
+/ping - Check if bridge is responsive
+/logs - Show recent log entries
 /help - Show this message`, { parse_mode: 'Markdown' });
       return;
     }
 
     if (text === '/ping') {
+      logger.logSystemCommand('/ping');
       bot.sendMessage(chatId, 'pong');
       return;
     }
 
+    // /logs - Show recent logs
+    if (text === '/logs' || text.startsWith('/logs ')) {
+      logger.logSystemCommand('/logs');
+      const parts = text.split(' ');
+      const category = parts[1] || 'bridge';
+      const lines = parseInt(parts[2]) || 20;
+
+      const logContent = logger.getRecentLogs(category, lines);
+      const truncated = logContent.length > 3500 ? logContent.slice(-3500) : logContent;
+
+      bot.sendMessage(chatId, `*Recent ${category} logs:*\n\`\`\`\n${truncated}\n\`\`\``, { parse_mode: 'Markdown' })
+        .catch(() => {
+          // If markdown fails, send without formatting
+          bot.sendMessage(chatId, `Recent ${category} logs:\n${truncated}`);
+        });
+      return;
+    }
+
     if (text === '/status') {
+      logger.logSystemCommand('/status');
       const status = getProcessStatus();
       const claudeStatus = claude ? 'Running' : 'Not running';
       const pid = claude?.pid || 'N/A';
+      const uptime = claudeStartTime ? Math.round((Date.now() - claudeStartTime) / 1000) : 0;
+      const lastMsgAgo = lastUserMessageTime ? Math.round((Date.now() - lastUserMessageTime) / 1000) : 'N/A';
+
+      const logFiles = logger.getLogFilesInfo();
+      const logInfo = logFiles.slice(0, 5).map(f => `  ${f.name} (${Math.round(f.size/1024)}KB)`).join('\n');
+
       bot.sendMessage(chatId,
 `*Status*
 Claude: ${claudeStatus}
 PID: ${pid}
-Related processes: ${status.count}`, { parse_mode: 'Markdown' });
+Uptime: ${uptime}s
+Last user message: ${lastMsgAgo}s ago
+Related processes: ${status.count}
+
+*Log Files:*
+${logInfo || '  None'}
+
+Use /logs [category] to view logs
+Categories: bridge, claude, mcp, agent, system`, { parse_mode: 'Markdown' });
       return;
     }
 
     if (text === '/restart') {
+      logger.logSystemCommand('/restart');
       bot.sendMessage(chatId, 'Restarting Claude...');
       if (claude) {
+        logger.loggers.system.info('Killing Claude for restart');
         claude.kill();
         claude = null;
       }
@@ -468,8 +680,10 @@ Related processes: ${status.count}`, { parse_mode: 'Markdown' });
     }
 
     if (text === '/kill') {
+      logger.logSystemCommand('/kill');
       bot.sendMessage(chatId, 'Killing all Claude processes...');
       if (claude) {
+        logger.loggers.system.info('Killing Claude process');
         claude.kill();
         claude = null;
       }
@@ -479,8 +693,10 @@ Related processes: ${status.count}`, { parse_mode: 'Markdown' });
     }
 
     if (text === '/reset') {
+      logger.logSystemCommand('/reset');
       bot.sendMessage(chatId, 'Full reset in progress...');
       if (claude) {
+        logger.loggers.system.info('Killing Claude for full reset');
         claude.kill();
         claude = null;
       }
@@ -492,19 +708,100 @@ Related processes: ${status.count}`, { parse_mode: 'Markdown' });
       return;
     }
 
-    // Forward non-command messages to Claude
+    // Forward non-command text messages to Claude
     if (text && !text.startsWith('/')) {
       sendToClaude(text);
     }
+
+    // Handle photos
+    if (msg.photo && msg.photo.length > 0) {
+      // Telegram sends photos in multiple sizes; get the largest one
+      const photo = msg.photo[msg.photo.length - 1];
+      const caption = msg.caption || '';
+
+      logger.loggers.bridge.info('Photo received', {
+        fileId: photo.file_id,
+        width: photo.width,
+        height: photo.height,
+        caption,
+      });
+
+      console.log('Photo received, downloading...');
+
+      downloadTelegramFile(photo.file_id, 'photo.jpg')
+        .then((localPath) => {
+          const message = `[Image received and saved to: ${localPath}]\n\nYou can view this image using the Read tool on that file path.${caption ? `\n\nCaption from user: ${caption}` : ''}`;
+          sendToClaude(message);
+        })
+        .catch((err) => {
+          logger.loggers.bridge.error('Failed to process photo', { error: err.message });
+          bot.sendMessage(chatId, 'Sorry, I failed to process that image. Please try again.');
+        });
+      return;
+    }
+
+    // Handle documents (including images sent as files)
+    if (msg.document) {
+      const doc = msg.document;
+      const mimeType = doc.mime_type || '';
+      const caption = msg.caption || '';
+
+      logger.loggers.bridge.info('Document received', {
+        fileId: doc.file_id,
+        fileName: doc.file_name,
+        mimeType,
+        fileSize: doc.file_size,
+      });
+
+      // Check if it's an image
+      if (mimeType.startsWith('image/')) {
+        console.log('Image document received, downloading...');
+
+        downloadTelegramFile(doc.file_id, doc.file_name)
+          .then((localPath) => {
+            const message = `[Image received and saved to: ${localPath}]\n\nYou can view this image using the Read tool on that file path.${caption ? `\n\nCaption from user: ${caption}` : ''}`;
+            sendToClaude(message);
+          })
+          .catch((err) => {
+            logger.loggers.bridge.error('Failed to process image document', { error: err.message });
+            bot.sendMessage(chatId, 'Sorry, I failed to process that image. Please try again.');
+          });
+        return;
+      } else {
+        // Non-image document
+        bot.sendMessage(chatId, `I received a document (${doc.file_name}), but I currently only support images. Please send images as photos or image files.`);
+        return;
+      }
+    }
   });
 
-  bot.on('polling_error', e => console.error('Poll:', e.message));
-  process.on('SIGINT', () => { if (claude) claude.kill(); process.exit(0); });
+  bot.on('polling_error', e => {
+    logger.logUnhandledError('telegram_polling', e);
+    console.error('Poll:', e.message);
+  });
+
+  // Cross-platform shutdown handling
+  platform.setupShutdownHandlers((signal) => {
+    logger.loggers.system.info(`${signal} received, shutting down`);
+    if (claude) claude.kill();
+    process.exit(0);
+  });
+
+  process.on('uncaughtException', (e) => {
+    logger.logUnhandledError('uncaughtException', e);
+    console.error('Uncaught exception:', e);
+  });
+
+  process.on('unhandledRejection', (e) => {
+    logger.logUnhandledError('unhandledRejection', e);
+    console.error('Unhandled rejection:', e);
+  });
 
   // Create output file and start Claude
   platform.ensureDir(path.dirname(OUTPUT_FILE));
   fs.writeFileSync(OUTPUT_FILE, '', 'utf8');
   startClaude();
+  logger.loggers.system.info('Bridge ready and listening');
   console.log('Ready - waiting for Telegram messages');
 }
 

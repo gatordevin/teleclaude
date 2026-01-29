@@ -283,18 +283,19 @@ async function main() {
     output: process.stdout
   });
 
-  // Handle Ctrl+C
+  // Handle readline close (Ctrl+D on Unix)
   rl.on('close', () => {
     console.log('');
     if (claude) claude.kill();
     process.exit(0);
   });
 
-  process.on('SIGINT', () => {
+  // Cross-platform shutdown handling (Ctrl+C)
+  platform.setupShutdownHandlers((signal) => {
     console.log('');
     console.log(c('cyan', '  Goodbye!'));
     if (claude) claude.kill();
-    rl.close();
+    if (rl) rl.close();
     process.exit(0);
   });
 

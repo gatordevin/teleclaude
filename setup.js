@@ -12,12 +12,15 @@ const path = require('path');
 const { execSync, spawn } = require('child_process');
 const readline = require('readline');
 
+// Cross-platform utilities - imported after npm install check
+let platform = null;
+
 // Configuration paths
 const CONFIG_FILE = path.join(__dirname, 'config.json');
 const CLAUDE_MD = path.join(__dirname, 'CLAUDE.md');
 const MCP_CONFIG = path.join(__dirname, 'mcp', 'config.json');
 
-// Cross-platform detection
+// Cross-platform detection (basic check before platform.js is available)
 const isWindows = process.platform === 'win32';
 
 // ANSI color codes (works without chalk)
@@ -41,13 +44,14 @@ function c(color, text) {
   return `${colors[color]}${text}${colors.reset}`;
 }
 
-// Cross-platform home directory
-function getHomeDir() {
+// Cross-platform helper functions
+// These are used before platform.js is available (during bootstrap)
+// After bootstrap, we use the platform module instead
+function getHomeDirFallback() {
   return process.env.HOME || process.env.USERPROFILE || require('os').homedir() || (isWindows ? 'C:\\Users\\Default' : '/home');
 }
 
-// Cross-platform command check
-function commandExists(command) {
+function commandExistsFallback(command) {
   try {
     if (isWindows) {
       execSync(`where ${command}`, { stdio: 'pipe' });
@@ -60,14 +64,29 @@ function commandExists(command) {
   }
 }
 
-// Cross-platform command version
-function getCommandVersion(command) {
+function getCommandVersionFallback(command) {
   try {
     const cmd = isWindows ? `${command} --version 2>nul` : `${command} --version 2>/dev/null`;
     return execSync(cmd, { encoding: 'utf8' }).trim();
   } catch (e) {
     return null;
   }
+}
+
+// Wrapper functions that use platform module when available, fallback otherwise
+function getHomeDir() {
+  if (platform) return platform.getHomeDir();
+  return getHomeDirFallback();
+}
+
+function commandExists(command) {
+  if (platform) return platform.commandExists(command);
+  return commandExistsFallback(command);
+}
+
+function getCommandVersion(command) {
+  if (platform) return platform.getCommandVersion(command);
+  return getCommandVersionFallback(command);
 }
 
 function printHeader() {
@@ -172,6 +191,13 @@ async function bootstrapDependencies() {
     }
   } else {
     success('Dependencies already installed');
+  }
+
+  // Now that dependencies are installed, load the platform module
+  try {
+    platform = require('./lib/platform');
+  } catch (e) {
+    // Platform module not available, will use fallbacks
   }
 
   console.log('');

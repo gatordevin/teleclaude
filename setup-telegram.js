@@ -12,6 +12,15 @@ const path = require('path');
 const { execSync } = require('child_process');
 const readline = require('readline');
 
+// Cross-platform utilities
+let platform;
+try {
+  platform = require('./lib/platform');
+} catch (e) {
+  // Platform module not available yet
+  platform = null;
+}
+
 // Configuration paths
 const CONFIG_FILE = path.join(__dirname, 'config.json');
 const CLAUDE_MD = path.join(__dirname, 'CLAUDE.md');
@@ -20,8 +29,9 @@ const MCP_CONFIG = path.join(__dirname, 'mcp', 'config.json');
 // Cross-platform detection
 const isWindows = process.platform === 'win32';
 
-// Cross-platform home directory
+// Cross-platform home directory (uses platform module if available)
 function getHomeDir() {
+  if (platform) return platform.getHomeDir();
   return process.env.HOME || process.env.USERPROFILE || require('os').homedir() || (isWindows ? 'C:\\Users\\Default' : '/home');
 }
 
