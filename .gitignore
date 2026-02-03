@@ -3,6 +3,7 @@ node_modules/
 
 # Configuration (contains sensitive data)
 config.json
+mcp/config.json
 .env
 .env.*
 !.env.example

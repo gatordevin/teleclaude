@@ -2,9 +2,13 @@
 
 You are operating as a Telegram bridge. The user is communicating with you through Telegram, NOT through this terminal.
 
-## MANDATORY: USE send_to_telegram FOR ALL RESPONSES
+## MANDATORY: USE THE MCP TOOL send_to_telegram FOR ALL RESPONSES
 
-The user CANNOT see your terminal output. Every single response must go through `send_to_telegram`.
+The user CANNOT see your terminal output. Every single response must go through the **MCP tool** `mcp__telegram__send_to_telegram`.
+
+**IMPORTANT:** Do NOT use Bash or node to call send_to_telegram. Use the MCP tool directly:
+- CORRECT: Use the MCP tool `send_to_telegram` with message parameter
+- WRONG: `node -e "require('./mcp/telegram-bridge')..."` - This will fail!
 
 ---
 
@@ -155,86 +159,93 @@ Reference this file to:
 - Find deployment URLs and management commands
 - Understand project configurations and dependencies
 
-### API Keys Storage - MANDATORY INSTRUCTIONS
+### API Keys Storage
 
 **Location:** `/home/farmspace/teleclaude/API_KEYS.md`
 
-**CRITICAL: Whenever you obtain ANY API key, you MUST store it in this file.**
-
-#### If API_KEYS.md Does Not Exist - Create It:
-
-```markdown
-# API_KEYS.md - Stored API Keys
-
-This file contains API keys that have been manually obtained (via browser login, etc.) and need to be stored for later use.
-
-**Security Note:** This file contains sensitive credentials. Do not share or commit to public repositories.
+**CRITICAL:** Store ALL API keys in this file using the format from `/home/farmspace/teleclaude/API_KEYS.template.md`.
 
 ---
 
-*Add new keys below using the standard format.*
-```
+## SECURITY: API Keys & Secrets
 
-#### Standard Format for Adding New Keys:
+**NEVER hardcode API keys, tokens, or secrets in code files.** This codebase is pushed to GitHub.
 
-Every new API key entry MUST follow this exact markdown table format:
+### Where to Store Secrets:
 
-```markdown
----
+| Type | Location | Notes |
+|------|----------|-------|
+| API Keys | `API_KEYS.md` | Gitignored, safe for all keys |
+| Environment Variables | `.env` files | Gitignored, for runtime config |
+| MCP Tool Tokens | Use `${VAR_NAME}` syntax in `mcp/config.json` | Reference env vars, don't hardcode |
+| OAuth Tokens | `*_tokens.json` files | Gitignored automatically |
 
-## [Service Name]
+### Gitignored Files (Safe for Secrets):
+- `API_KEYS.md` - Primary key storage
+- `mcp/config.json` - MCP configuration with env var references
+- `.env`, `.env.*` - Environment files
+- `*_tokens.json` - OAuth/auth tokens
+- `credentials.json` - Service credentials
+- `PROJECTS.md` - Project tracking
 
-| Field | Value |
-|-------|-------|
-| Service | [Full Service Name] |
-| Key Name | [Name given to the key] |
-| API Key | `[the-actual-api-key]` |
-| API Endpoint | [endpoint URL if applicable] |
-| Permissions | [what the key can access] |
-| Created | YYYY-MM-DD |
-| Console URL | [URL to manage this key] |
-
-**Notes:** [Any additional context about the key]
-
----
-```
-
-#### Adding a New Key - Step by Step:
-
-1. Read the current API_KEYS.md file (or create it if missing)
-2. Scroll to the end of the file
-3. Add a new section using the format above
-4. Include ALL relevant fields (service name, key name, the actual key, date, etc.)
-5. Always wrap the actual API key in backticks: `like-this`
-
-#### Template Reference:
-- See `/home/farmspace/teleclaude/API_KEYS.template.md` for format examples
-- Contains placeholder entries for common services
-
-#### Example - Adding an OpenAI Key:
-
-```markdown
----
-
-## OpenAI Platform
-
-| Field | Value |
-|-------|-------|
-| Service | OpenAI Platform |
-| Key Name | my-project-key |
-| API Key | `sk-proj-abc123xyz789...` |
-| Created | 2026-01-29 |
-| Console URL | https://platform.openai.com/api-keys |
-
----
-```
+### Before Pushing to GitHub:
+1. Run `git status` to check what's being tracked
+2. Ensure NO files with hardcoded secrets are staged
+3. Use `${ENV_VAR}` syntax for any tokens in config files
+4. When in doubt, add the file to `.gitignore`
 
 ### Workflows & Skills
-- **Location:** `./SKILLS.md` (in bridge directory)
+- **Location:** `./SKILLS.md` (in this directory)
 - Documents procedures for logging into services, generating API keys, etc.
-- Reference this before attempting browser-based logins
+- **ALWAYS reference this file before attempting a new workflow**
+- **ALWAYS add new workflows to this file after completing them successfully**
 
-### Default Login Credentials (Configure Locally)
-- **Email:** [Configure in your local CLAUDE.md]
-- **Password:** [Configure in your local CLAUDE.md]
-- **Google 2FA:** If enabled, select "Tap Yes on phone/tablet" for approval
+### MCP Tools Configuration
+- **Location:** `./mcp/config.json`
+- Defines what external tools (MCP servers) you have access to
+- **When you create a new MCP tool, you MUST register it here**
+
+---
+
+## SELF-IMPROVEMENT: Adding New Capabilities
+
+### Adding New Skills/Workflows
+
+After successfully completing a new workflow (login, API generation, browser automation, etc.):
+
+1. **Document it in SKILLS.md** using the templates provided
+2. Include:
+   - Step-by-step commands/actions
+   - URLs and element references
+   - Common issues and solutions
+   - Prerequisites
+3. Future runs will reference this for faster execution
+
+### Creating New MCP Tools
+
+If you build a new MCP server/tool for yourself:
+
+1. **Create the tool** in `./mcp/` directory
+2. **Register it** in `./mcp/config.json`:
+   ```json
+   {
+     "mcpServers": {
+       "your-new-tool": {
+         "command": "node",
+         "args": ["./mcp/your-new-tool.js"]
+       }
+     }
+   }
+   ```
+3. **Update permissions** in `./.claude/settings.local.json`:
+   ```json
+   {
+     "permissions": {
+       "allow": [
+         "mcp__your-new-tool__*"
+       ]
+     }
+   }
+   ```
+4. **Request a /reset** from the user to reload with new tools
+5. **Document the tool** in SKILLS.md
